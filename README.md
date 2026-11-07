@@ -1,133 +1,93 @@
-# garmin-mcp — personal Garmin coach for Claude
+# garmin-mcp
 
-A personal [MCP](https://modelcontextprotocol.io) server. It gives Claude live access to your
-Garmin Connect data together with your training plan (**Sub-2:00 HM · JRF 2027**), so Claude can
-coach you from real numbers: what to run today, whether to back off, how last week went, and
-whether you're on track for sub-2:00.
+A private, single-user MCP server that gives Claude read-only access to **my own** Garmin Connect
+data. It runs on Render's free tier and is added to claude.ai as a custom connector.
 
-It reads activities, HR time series, sleep, HRV, training readiness, training status and race
-predictions. It can also **push structured, HR-targeted workouts to your watch**.
+- **Access control:** the MCP endpoint lives at a secret URL path, `/<MCP_PATH_SECRET>/mcp`.
+  Every other path returns 404, except `GET /health`.
+- **Garmin tokens:** stored Fernet-encrypted in a secret GitHub gist. The server writes them back
+  whenever Garmin rotates them, so restarts on Render's ephemeral disk don't break anything.
+- **Credentials:** your Garmin email and password never leave your laptop.
 
-> Uses the unofficial [`garminconnect`](https://github.com/cyberjunky/python-garminconnect) library
-> (Garmin's official API is for approved businesses only). It logs in as you; your data stays
-> between your machine, Garmin, and Claude.
+## Tools
 
-## What Claude can do with it
-
-| Tool | What it answers |
+| Tool | Returns |
 |---|---|
-| `get_today` | "What do I run today?": planned session with HR targets and estimated time, what's already logged, readiness verdict, tomorrow |
-| `review_week` | Sunday review: planned vs actual per day, km, and the plan's 6-item checklist (5/6 = good week) |
-| `check_fatigue` | The plan's fatigue rules: easy-run HR drift at the same pace, bad-sleep streaks, HRV, readiness, ACWR → `proceed` / `easy_today` / `reduce_week_25` |
-| `analyze_activity` | One run vs the plan: laps, time in **your** zones, % at HR ≤ 150, aerobic decoupling (Pa:HR), tempo block, strides |
-| `analyze_test` | Time trials (best effort, pass/target/stretch, Riegel HM equivalent, race pace from 10K TT), monthly aerobic test (30 min at HR 143–147), tempo test |
-| `get_progress` | Every test so far vs milestones, labelled improving / slowing / flat / regressing, plus 8-week volume |
-| `get_race_outlook` | Days to JRF 2027, gap to 2:00, Garmin predictions, race-pace table, race execution |
-| `get_athlete_snapshot`, `get_wellness_trend`, `get_training_status`, `list_activities` | Raw live data |
-| `get_plan_overview`, `get_planned_week` | The plan itself (works without Garmin login) |
-| `push_workout`, `push_week`, `push_custom_workout` | Upload structured workouts (warm-up / repeats / HR targets) to Garmin Connect and schedule them on your calendar. Each one previews first; it uploads only with `confirm=true` |
+| `list_activities(start_date, end_date, activity_type="running", limit=30)` | id, name, type, start time, km, duration, pace, avg/max HR, elevation, cadence, training effect, VO2max |
+| `get_activity(activity_id)` | summary + per-lap/km splits (pace, HR, cadence, elevation) + HR-zone time |
+| `get_daily_summary(date)` | steps, resting HR, stress, Body Battery, calories, intensity minutes |
+| `get_sleep(date)` | duration, stages, score, bed/wake time, overnight HRV, resting HR |
+| `get_hrv(date)` · `get_training_readiness(date)` · `get_training_status(date)` · `get_max_metrics(date)` | recovery and fitness status, VO2max |
+| `get_race_predictions()` · `get_personal_records()` · `get_endurance_score(date)` · `get_lactate_threshold()` | performance markers |
+| `get_body_battery(start_date, end_date)` · `get_heart_rates(date)` | daily Body Battery, hourly HR summary |
 
-Prompts: `daily_checkin`, `weekly_review_prompt`, `monthly_progress_prompt`. Resource: `plan://current`.
+Dates are `YYYY-MM-DD` and default to today in Asia/Jakarta.
 
-## Setup (once, on your computer)
+## Setup
 
-Requires Python 3.12+. [uv](https://docs.astral.sh/uv/) is the easiest way.
+### 1. Create the tokens (once, on your laptop)
 
-```bash
+Requires Python 3.12. On Windows PowerShell:
+
+```powershell
 git clone https://github.com/inifatih/garmin-mcp.git
 cd garmin-mcp
-uv sync                       # or: python -m venv .venv && . .venv/bin/activate && pip install -e .
-uv run garmin-mcp-login       # email, password, MFA code → tokens saved in ~/.garminconnect
+py -3.12 -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python scripts\setup_tokens.py
 ```
 
-You only log in once. The tokens refresh themselves, and your password is never stored.
+The script will:
+1. Ask for your Garmin email, password, and an MFA code if Garmin sends one. None of these are saved.
+2. Ask for a GitHub **classic** token with **only** the `gist` scope. The script prints the link
+   to create one.
+3. Create a secret gist containing the encrypted tokens and print **4 env vars** plus your
+   connector URL.
 
-## Connect it to Claude
+### 2. Deploy on Render
 
-### Claude Desktop (simplest)
+1. Render dashboard → **New → Blueprint** → pick `inifatih/garmin-mcp` (branch `main`).
+2. When prompted, paste the 4 values: `GARMIN_TOKEN_KEY`, `GIST_ID`, `GIST_TOKEN`,
+   `MCP_PATH_SECRET`.
+3. Deploy. Check that `https://<service>.onrender.com/health` returns `ok`.
 
-Settings → Developer → Edit Config, then add (use the absolute path to the repo):
+### 3. Add it to Claude
 
-```json
-{
-  "mcpServers": {
-    "garmin": {
-      "command": "uv",
-      "args": ["--directory", "/ABSOLUTE/PATH/TO/garmin-mcp", "run", "garmin-mcp"]
-    }
-  }
-}
+claude.ai → **Settings → Connectors → Add custom connector** → URL:
+
+```
+https://<service>.onrender.com/<MCP_PATH_SECRET>/mcp
 ```
 
-Restart Claude Desktop, then ask: *"What's my run today?"*
+Leave the OAuth fields empty. Then ask Claude something like "How did my runs go this week?"
 
-### Claude Code
+## Good to know
+
+- **The free tier sleeps.** Render spins the service down after about 15 minutes idle. The first
+  call afterwards can take up to a minute while it wakes up and logs in to Garmin. If Claude
+  times out, just ask again.
+- **Tokens expired?** If tools say "run `setup_tokens.py --rotate`", run
+  `python scripts\setup_tokens.py --rotate` and paste the existing `GIST_ID`, `GIST_TOKEN` and
+  `GARMIN_TOKEN_KEY` when asked. The script logs in again and overwrites the gist. Then restart
+  the Render service. No env vars change.
+- **To revoke access:**
+  - **Garmin access:** delete the gist (gist.github.com), or log out all sessions in Garmin
+    Connect account settings.
+  - **Gist access:** delete or regenerate the `gist`-scope token in GitHub → Settings →
+    Developer settings.
+  - **Connector URL:** set a new `MCP_PATH_SECRET` on Render, and update the URL in claude.ai.
+- **The URL is the password.** Anyone with the connector URL can read your Garmin data. Don't
+  share it. The server never logs the secret path or any tokens.
+- **Local dev:** set `MCP_PATH_SECRET` and either the 3 gist vars or `GARMINTOKENS` (plaintext
+  token JSON), then run `python server.py` (port from `PORT`, default 8000).
+
+## Tests
 
 ```bash
-claude mcp add garmin -- uv --directory /ABSOLUTE/PATH/TO/garmin-mcp run garmin-mcp
-```
-
-### claude.ai and the phone app (remote server)
-
-The web and mobile apps need the server reachable over HTTPS. Run it in HTTP mode behind a
-secret token:
-
-```bash
-export GARMIN_MCP_TOKEN=$(python -c 'import secrets;print(secrets.token_urlsafe(32))')
-uv run garmin-mcp --transport http --host 0.0.0.0 --port 8000
-```
-
-Expose it with any HTTPS tunnel or host, for example
-`cloudflared tunnel --url http://localhost:8000`, or the Dockerfile on Fly.io, Render or a VPS. Then in
-claude.ai go to **Settings → Connectors → Add custom connector** and use:
-
-```
-https://YOUR-HOST/mcp?token=YOUR_GARMIN_MCP_TOKEN
-```
-
-On a host without a filesystem for `~/.garminconnect`, run `garmin-mcp-login --print-tokens` on
-your computer and put the printed JSON in the `GARMINTOKENS` secret. Garmin sometimes blocks
-logins from cloud IPs, which is why you log in at home and copy only the tokens. The server
-refuses to listen on a public interface without `GARMIN_MCP_TOKEN`.
-
-```bash
-docker build -t garmin-mcp .
-docker run -p 8000:8000 -e GARMIN_MCP_TOKEN=... -e GARMINTOKENS='{"...":"..."}' garmin-mcp
-```
-
-## Configuration
-
-| Env var | Default | Purpose |
-|---|---|---|
-| `GARMINTOKENS` | `~/.garminconnect` | Token directory, or the token JSON itself |
-| `GARMIN_EMAIL` / `GARMIN_PASSWORD` | – | Optional fallback login (no MFA) |
-| `GARMIN_MCP_PLAN` | bundled `jrf2027_sub2.yaml` | Path to your own plan YAML |
-| `GARMIN_MCP_RACE_PACE` | – | e.g. `5:39`. Set after TT 19 Sep so HM-pace steps get a pace target on the watch |
-| `GARMIN_MCP_TOKEN` | – | Shared secret for HTTP mode (`Authorization: Bearer …` or `?token=…`) |
-| `GARMIN_MCP_ALLOWED_HOSTS` | – | Comma-separated hostnames for DNS-rebinding protection in HTTP mode |
-| `GARMIN_MCP_CACHE_TTL` | `120` | Seconds to cache Garmin responses within a conversation |
-
-## The plan file
-
-The plan is plain YAML at `src/garmin_mcp/plans/jrf2027_sub2.yaml`: goal, HR zones, phases,
-milestones, test days, the weekly checklist, every rule from the plan doc, and all 51 weeks. Sessions
-use a small notation that the coach tools and the workout builder both read:
-
-```
-2km easy · 13km steady
-4km easy · 2x(3km tempo / 1km steady) · 4km easy     # repeats skip the last recovery
-40min easy · 6x(20s strides / 60s easy)
-```
-
-Zones: `recovery`, `easy` (138–150), `aerobic_test` (143–147), `steady` (148–155), `tempo` (158–165),
-`tempo_test` (160–165), `hmp`, `tt`, `race`, `strides`. When the plan changes, edit the YAML and
-the server picks it up on the next call.
-
-## Development
-
-```bash
-uv sync --extra dev   # or pip install -e ".[dev]"
+pip install -r requirements.txt pytest
 pytest
 ```
 
-The tests run against a fake Garmin client with synthetic HR and speed data, so they need no account.
+Garmin and the GitHub API are mocked. The tests cover token rotation → gist PATCH, the 404s for
+wrong paths, `/health`, log redaction, and every tool's output trimming.

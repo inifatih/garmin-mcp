@@ -1,10 +1,11 @@
+.env
+.env.*
 .venv/
+venv/
 __pycache__/
 *.pyc
 .pytest_cache/
-dist/
-build/
-*.egg-info/
-.env
 .garminconnect/
-garmin_tokens*.json
+garmin_tokens*
+*.enc
+tokens*.json

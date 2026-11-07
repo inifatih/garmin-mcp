@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: garmin-mcp
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      - key: GARMIN_TOKEN_KEY
+        sync: false
+      - key: GIST_ID
+        sync: false
+      - key: GIST_TOKEN
+        sync: false
+      - key: MCP_PATH_SECRET
+        sync: false
